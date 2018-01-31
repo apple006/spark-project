@@ -41,4 +41,20 @@ public class ConfigurationManager {
         return prop.getProperty(key);
     }
 
+    /**
+     * 获取整数类型的配置项
+     *
+     * @param key
+     * @return
+     */
+    public static Integer getInteger(String key) {
+        String value = prop.getProperty(key);
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException e) {
+            LOGGER.error(e.getMessage(), e);
+        }
+        return 0;
+    }
+
 }
