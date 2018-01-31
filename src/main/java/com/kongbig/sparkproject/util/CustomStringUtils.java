@@ -29,7 +29,7 @@ public class CustomStringUtils {
      * @param str
      * @return
      */
-    public static String fulfulill(String str) {
+    public static String fulfuill(String str) {
         if (str.length() == 2) {
             return str;
         } else {
