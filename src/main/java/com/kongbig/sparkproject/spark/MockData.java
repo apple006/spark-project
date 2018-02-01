@@ -36,20 +36,22 @@ public class MockData {
         String[] searchKeywords = new String[]{"火锅", "蛋糕", "重庆辣子鸡", "重庆小面",
                 "呷哺呷哺", "新辣道鱼火锅", "国贸大厦", "太古商场", "日本料理", "温泉"};
         String date = DateUtils.getTodayDate();
+        // 用户行为：搜索、点击、下订单、支付
         String[] actions = new String[]{"search", "click", "order", "pay"};
         Random random = new Random();
 
         for (int i = 0; i < 100; i++) {
-            long userid = random.nextInt(100);
+            long userId = random.nextInt(100);// 0-99随机数
 
             for (int j = 0; j < 10; j++) {
-                String sessionid = UUID.randomUUID().toString().replace("-", "");
-                String baseActionTime = date + " " + random.nextInt(23);
+                String sessionId = UUID.randomUUID().toString().replace("-", "");
+                String baseActionTime = date + " " + random.nextInt(23);// 0-22随机数
 
                 Long clickCategoryId = null;
 
                 for (int k = 0; k < random.nextInt(100); k++) {
-                    long pageid = random.nextInt(10);
+                    long pageId = random.nextInt(10);
+                    // actionTime:yyyy-MM-dd HH:mm:ss
                     String actionTime = baseActionTime + ":" + CustomStringUtils.fulfuill(String.valueOf(random.nextInt(59))) + ":" + CustomStringUtils.fulfuill(String.valueOf(random.nextInt(59)));
                     String searchKeyword = null;
                     Long clickProductId = null;
@@ -57,7 +59,7 @@ public class MockData {
                     String orderProductIds = null;
                     String payCategoryIds = null;
                     String payProductIds = null;
-
+                    // 0-3:用户行为：搜索、点击、下订单、支付
                     String action = actions[random.nextInt(4)];
                     if ("search".equals(action)) {
                         searchKeyword = searchKeywords[random.nextInt(10)];
@@ -74,39 +76,48 @@ public class MockData {
                         payProductIds = String.valueOf(random.nextInt(100));
                     }
 
-                    Row row = RowFactory.create(date, userid, sessionid,
-                            pageid, actionTime, searchKeyword,
-                            clickCategoryId, clickProductId,
-                            orderCategoryIds, orderProductIds,
-                            payCategoryIds, payProductIds,
-                            Long.valueOf(String.valueOf(random.nextInt(10))));
+                    Row row = RowFactory.create(date, 
+                            userId, 
+                            sessionId,
+                            pageId, 
+                            actionTime, 
+                            searchKeyword,
+                            clickCategoryId, 
+                            clickProductId,
+                            orderCategoryIds, 
+                            orderProductIds,
+                            payCategoryIds, 
+                            payProductIds,
+                            Long.valueOf(String.valueOf(random.nextInt(10))));// 城市Id
                     rows.add(row);
                 }
             }
         }
 
+        // Distribute a local Scala collection to form an RDD.
         JavaRDD<Row> rowsRDD = sc.parallelize(rows);
 
+        // 通过StructType直接指定Schema
         StructType schema = DataTypes.createStructType(Arrays.asList(
-                DataTypes.createStructField("date", DataTypes.StringType, true),
-                DataTypes.createStructField("user_id", DataTypes.LongType, true),
-                DataTypes.createStructField("session_id", DataTypes.StringType, true),
-                DataTypes.createStructField("page_id", DataTypes.LongType, true),
-                DataTypes.createStructField("action_time", DataTypes.StringType, true),
-                DataTypes.createStructField("search_keyword", DataTypes.StringType, true),
-                DataTypes.createStructField("click_category_id", DataTypes.LongType, true),
-                DataTypes.createStructField("click_product_id", DataTypes.LongType, true),
-                DataTypes.createStructField("order_category_ids", DataTypes.StringType, true),
-                DataTypes.createStructField("order_product_ids", DataTypes.StringType, true),
-                DataTypes.createStructField("pay_category_ids", DataTypes.StringType, true),
-                DataTypes.createStructField("pay_product_ids", DataTypes.StringType, true),
-                DataTypes.createStructField("city_id", DataTypes.LongType, true)));
+                DataTypes.createStructField("date", DataTypes.StringType, true),// 0
+                DataTypes.createStructField("user_id", DataTypes.LongType, true),// 1
+                DataTypes.createStructField("session_id", DataTypes.StringType, true),// 2
+                DataTypes.createStructField("page_id", DataTypes.LongType, true),// 3
+                DataTypes.createStructField("action_time", DataTypes.StringType, true),// 4
+                DataTypes.createStructField("search_keyword", DataTypes.StringType, true),// 5
+                DataTypes.createStructField("click_category_id", DataTypes.LongType, true),// 6
+                DataTypes.createStructField("click_product_id", DataTypes.LongType, true),// 7
+                DataTypes.createStructField("order_category_ids", DataTypes.StringType, true),// 8
+                DataTypes.createStructField("order_product_ids", DataTypes.StringType, true),// 9
+                DataTypes.createStructField("pay_category_ids", DataTypes.StringType, true),// 10
+                DataTypes.createStructField("pay_product_ids", DataTypes.StringType, true),// 11
+                DataTypes.createStructField("city_id", DataTypes.LongType, true)));// 12
 
         DataFrame df = sqlContext.createDataFrame(rowsRDD, schema);
         
-        // 注册成临时表
+        // **注册成临时表
         df.registerTempTable("user_visit_action");
-        for (Row _row : df.take(1)) {
+        for (Row _row : df.take(1)) {// 取出第一条记录打印
             System.out.println(_row);
         }
 
@@ -117,29 +128,34 @@ public class MockData {
         rows.clear();
         String[] sexes = new String[]{"male", "female"};
         for (int i = 0; i < 100; i++) {
-            long userid = i;
+            long userId = i;
             String username = "user" + i;
             String name = "name" + i;
-            int age = random.nextInt(60);
+            int age = random.nextInt(60);// 0-59岁
             String professional = "professional" + random.nextInt(100);
             String city = "city" + random.nextInt(100);
             String sex = sexes[random.nextInt(2)];
 
-            Row row = RowFactory.create(userid, username, name, age,
-                    professional, city, sex);
+            Row row = RowFactory.create(userId, 
+                    username, 
+                    name, 
+                    age,
+                    professional, 
+                    city, 
+                    sex);
             rows.add(row);
         }
 
         rowsRDD = sc.parallelize(rows);
 
         StructType schema2 = DataTypes.createStructType(Arrays.asList(
-                DataTypes.createStructField("user_id", DataTypes.LongType, true),
-                DataTypes.createStructField("username", DataTypes.StringType, true),
-                DataTypes.createStructField("name", DataTypes.StringType, true),
-                DataTypes.createStructField("age", DataTypes.IntegerType, true),
-                DataTypes.createStructField("professional", DataTypes.StringType, true),
-                DataTypes.createStructField("city", DataTypes.StringType, true),
-                DataTypes.createStructField("sex", DataTypes.StringType, true)));
+                DataTypes.createStructField("user_id", DataTypes.LongType, true),// 0
+                DataTypes.createStructField("username", DataTypes.StringType, true),// 1
+                DataTypes.createStructField("name", DataTypes.StringType, true),// 2
+                DataTypes.createStructField("age", DataTypes.IntegerType, true),// 3
+                DataTypes.createStructField("professional", DataTypes.StringType, true),// 4
+                DataTypes.createStructField("city", DataTypes.StringType, true),// 5
+                DataTypes.createStructField("sex", DataTypes.StringType, true)));// 6
 
         DataFrame df2 = sqlContext.createDataFrame(rowsRDD, schema2);
         for (Row _row : df2.take(1)) {
@@ -160,7 +176,9 @@ public class MockData {
             String productName = "product" + i;
             String extendInfo = "{\"product_status\": " + productStatus[random.nextInt(2)] + "}";
 
-            Row row = RowFactory.create(productId, productName, extendInfo);
+            Row row = RowFactory.create(productId, 
+                    productName, 
+                    extendInfo);
             rows.add(row);
         }
 
