@@ -38,6 +38,7 @@ public class ConfigurationManager {
      * @return value
      */
     public static String getProperty(String key) {
+        System.out.println("测试github");
         return prop.getProperty(key);
     }
 
