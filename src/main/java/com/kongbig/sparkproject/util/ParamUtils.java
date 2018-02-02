@@ -22,7 +22,7 @@ public class ParamUtils {
     public static Long getTaskIdFromArgs(String[] args) {
         try {
             if (args != null && args.length > 0) {
-                return Long.valueOf(args[0]);
+                return Long.valueOf(args[0]);// 取出了第一个参数
             }
         } catch (NumberFormatException e) {
             LOGGER.error(e.getMessage(), e);

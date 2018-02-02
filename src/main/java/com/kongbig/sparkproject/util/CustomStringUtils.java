@@ -29,7 +29,7 @@ public class CustomStringUtils {
      * @param str
      * @return
      */
-    public static String fulfulill(String str) {
+    public static String fulfuill(String str) {
         if (str.length() == 2) {
             return str;
         } else {
@@ -38,7 +38,7 @@ public class CustomStringUtils {
     }
 
     /**
-     * 从拼接的字符串中提取字段
+     * 从拼接的字符串中提取字段的值
      *
      * @param str       字符串
      * @param delimiter 分隔符
@@ -48,10 +48,12 @@ public class CustomStringUtils {
     public static String getFieldFromConcatString(String str, String delimiter, String field) {
         String[] fields = str.split(delimiter);
         for (String concatField : fields) {
-            String fieldName = concatField.split("=")[0];
-            String fieldsValue = concatField.split("=")[1];
-            if (fieldName.equals(field)) {
-                return fieldsValue;
+            if (concatField.split("=").length == 2) {
+                String fieldName = concatField.split("=")[0];
+                String fieldsValue = concatField.split("=")[1];
+                if (fieldName.equals(field)) {
+                    return fieldsValue;
+                }
             }
         }
         return null;
