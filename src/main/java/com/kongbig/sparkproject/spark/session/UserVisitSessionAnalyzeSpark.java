@@ -8,6 +8,7 @@ import com.kongbig.sparkproject.dao.impl.DAOFactory;
 import com.kongbig.sparkproject.domain.Task;
 import com.kongbig.sparkproject.spark.MockData;
 import com.kongbig.sparkproject.util.CustomStringUtils;
+import com.kongbig.sparkproject.util.DateUtils;
 import com.kongbig.sparkproject.util.ParamUtils;
 import com.kongbig.sparkproject.util.ValidUtils;
 import org.apache.commons.lang.StringUtils;
@@ -24,6 +25,7 @@ import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.hive.HiveContext;
 import scala.Tuple2;
 
+import java.util.Date;
 import java.util.Iterator;
 
 /**
@@ -81,11 +83,6 @@ public class UserVisitSessionAnalyzeSpark {
          */
         // <sessionId, (sessionId,searchKeywords,clickCategoryIds,age,professinal,city,sex)>
         JavaPairRDD<String, String> sessionId2AggrInfoRDD = aggregateBySession(sqlContext, actionRDD);
-        System.out.println("聚合后数据总数：" + sessionId2AggrInfoRDD.count());
-        // 打印聚合后的数据的前十条
-        for (Tuple2<String, String> tuple : sessionId2AggrInfoRDD.take(10)) {
-            System.out.println(tuple._2);
-        }
 
         /**
          * 针对session粒度的聚合数据，按照使用者指定的筛选参数进行数据过滤。
@@ -94,11 +91,42 @@ public class UserVisitSessionAnalyzeSpark {
          */
         JavaPairRDD<String, String> filteredSessionId2AggrInfoRDD
                 = filterSession(sessionId2AggrInfoRDD, taskParam);
-        System.out.println("过滤后数据总数：" + filteredSessionId2AggrInfoRDD.count());
-        // 打印过滤后的数据的前十条
-        for (Tuple2<String, String> tuple : filteredSessionId2AggrInfoRDD.take(10)) {
-            System.out.println(tuple._2);
-        }
+
+        /**
+         * session聚合统计（统计出访问时长和访问步长，各个区间的session数量占总session数量的比例）
+         *
+         * 如果不进行重构，直接来实现，思路：
+         * 1、actionRDD，映射成<sessionId, Row>的格式
+         * 2、按sessionId聚合，计算出每个session的访问时长和访问步长，生成一个新的RDD
+         * 3、遍历新生成的RDD，将每个session的访问时长和访问步长，去更新自定义Accumulator中的对应的值
+         * 4、使用自定义Accumulator中的统计值，去计算各个区间的比例
+         * 5、将最后计算出来的结果，写入MySQL对应的表中
+         *
+         * 普通实现思路的问题：
+         * 1、之前session聚合已做过映射，再用actionRDD会多此一举
+         * 2、是不是一定要为了session的聚合这个功能，单独去遍历一边session？无必要，已有session数据
+         *      之前过滤session的时候，其实就相当于是在遍历session，那么这里没必要。
+         *
+         *  重构实现思路：
+         *  1、不要去生成任何新的RDD（可能上亿数据量）
+         *  2、不要去单独遍历一遍session的数据（可能处理上千万数据量）
+         *  3、可以在进行session聚合的时候，就直接计算出来每个session的访问时长和访问步长
+         *  4、在进行过滤的时候，本来就要遍历所有的聚合session信息，此时就可以在某个session通过筛选条件后
+         *      将其访问时长和访问步长，累加到自定义的Accumulator上面去
+         *  5、两种方式，在面对上亿，上千万数据的时候，甚至可以节省时间长达半小时-几小时
+         *
+         *  开发Spark大型复杂项目的一些经验准则：
+         *  1、尽量少生成RDD
+         *  2、尽量少对RDD进行算子操作，如果有可能，尽量在一个算子里面，实现多个需要做的功能
+         *  3、尽量少对RDD进行shuffle算子操作，比如groupByKey、reduceByKey、sortByKey
+         *      shuffle操作，会导致大量的磁盘读写，严重降低性能
+         *      有shuffle的算子，和没有shuffle的算子，甚至性能，会达到几十分钟-数个小时的差别
+         *      有shuffle的算子，很容易导致数据倾斜（性能杀手）
+         *  4、无论做什么功能，性能第一
+         *      在传统J2EE架构/可维护性/可扩展性高于性能
+         *      在大数据项目中，比如MR、Hive、Spark、Storm，性能最重要（第一位）
+         *      所以推荐大数据项目，在开发和代码的架构中，有限考虑性能；其次考虑功能代码的划分、解耦合
+         */
 
         // 关闭Spark上下文
         sc.close();
@@ -159,7 +187,7 @@ public class UserVisitSessionAnalyzeSpark {
      * @return session粒度聚合数据
      */
     private static JavaPairRDD<String, String> aggregateBySession(
-            SQLContext sqlContext, JavaRDD<Row> actionRDD) {
+            SQLContext sqlContext, final JavaRDD<Row> actionRDD) {
         // 现在actionRDD中的元素是Row，一个Row就是一行用户访问行为记录(如:一次点击或搜索)
         // 1.需要将这个Row映射成<sessionId, Row>的格式
         JavaPairRDD<String, Row> sessionId2ActionRDD = actionRDD.mapToPair(
@@ -197,6 +225,12 @@ public class UserVisitSessionAnalyzeSpark {
 
                         Long userId = null;
 
+                        // session的起始和结束时间
+                        Date startTime = null;
+                        Date endTime = null;
+                        // session的访问步长
+                        int stepLength = 0;
+
                         // 遍历session所有的访问行为
                         while (iterator.hasNext()) {
                             // 提取每个访问行为的搜索词字段和点击品类字段(临时表user_visit_action)
@@ -223,10 +257,33 @@ public class UserVisitSessionAnalyzeSpark {
                                     clickCategoryIdsBuffer.append(clickCategoryId + ",");
                                 }
                             }
+
+                            // 计算session开始和结束时间
+                            Date actionTime = DateUtils.parseTime(row.getString(4));
+
+                            if (null == startTime) {
+                                startTime = actionTime;
+                            }
+                            if (null == endTime) {
+                                endTime = actionTime;
+                            }
+
+                            if (actionTime.before(startTime)) {
+                                startTime = actionTime;
+                            }
+                            if (actionTime.after(endTime)) {
+                                endTime = actionTime;
+                            }
+
+                            // 计算session访问步长
+                            stepLength++;
                         }
 
                         String searchKeywords = CustomStringUtils.trimComma(searchKeywordsBuffer.toString());
                         String clickCategoryIds = CustomStringUtils.trimComma(clickCategoryIdsBuffer.toString());
+
+                        // 计算session访问时长（秒）
+                        long visitLength = (endTime.getTime() - startTime.getTime()) / 1000;
 
                         /**
                          * 返回的数据格式，即<sessionId, partAggrInfo>
@@ -241,7 +298,9 @@ public class UserVisitSessionAnalyzeSpark {
                          */
                         String partAggrInfo = Constants.FIELD_SESSION_ID + "=" + sessionId + "|"
                                 + Constants.FIELD_SEARCH_KEYWORDS + "=" + searchKeywords + "|"
-                                + Constants.FIELD_CLICK_CATEGORY_IDS + "=" + clickCategoryIds;
+                                + Constants.FIELD_CLICK_CATEGORY_IDS + "=" + clickCategoryIds + "|"
+                                + Constants.FIELD_VISIT_LENGTH + "=" + visitLength + "|"
+                                + Constants.FIELD_STEP_LENGTH + "=" + stepLength;
                         // 参数1:session对应的userId; 参数2:session对应的部分聚合数据
                         return new Tuple2<Long, String>(userId, partAggrInfo);
                     }

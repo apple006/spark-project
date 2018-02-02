@@ -139,4 +139,19 @@ public class DateUtils {
         return TIME_FORMAT.format(date);
     }
 
+    /**
+     * 解析时间字符串
+     *
+     * @param time 时间字符串
+     * @return
+     */
+    public static Date parseTime(String time) {
+        try {
+            return TIME_FORMAT.parse(time);
+        } catch (ParseException e) {
+            LOGGER.error(e.getMessage(), e);
+        }
+        return null;
+    }
+
 }
