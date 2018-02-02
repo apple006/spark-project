@@ -9,12 +9,14 @@ import com.kongbig.sparkproject.domain.Task;
 import com.kongbig.sparkproject.spark.MockData;
 import com.kongbig.sparkproject.util.CustomStringUtils;
 import com.kongbig.sparkproject.util.ParamUtils;
+import com.kongbig.sparkproject.util.ValidUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.spark.SparkConf;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.Function;
 import org.apache.spark.api.java.function.PairFunction;
 import org.apache.spark.sql.DataFrame;
 import org.apache.spark.sql.Row;
@@ -47,6 +49,8 @@ import java.util.Iterator;
 public class UserVisitSessionAnalyzeSpark {
 
     public static void main(String[] args) {
+        args = new String[]{"1"};
+
         // 构建Spark上下文
         SparkConf conf = new SparkConf()
                 .setAppName(Constants.SPARK_APP_NAME_SESSION)
@@ -75,7 +79,26 @@ public class UserVisitSessionAnalyzeSpark {
          * 首先，可以将行为数据，按照session_id进行groupByKey分组，此时的数据的粒度就是session粒度了。
          * 然后，可以将session粒度的数据与用户信息数据，进行join，就获取到session粒度的数据（包含session对应的user的信息）
          */
+        // <sessionId, (sessionId,searchKeywords,clickCategoryIds,age,professinal,city,sex)>
         JavaPairRDD<String, String> sessionId2AggrInfoRDD = aggregateBySession(sqlContext, actionRDD);
+        System.out.println("聚合后数据总数：" + sessionId2AggrInfoRDD.count());
+        // 打印聚合后的数据的前十条
+        for (Tuple2<String, String> tuple : sessionId2AggrInfoRDD.take(10)) {
+            System.out.println(tuple._2);
+        }
+
+        /**
+         * 针对session粒度的聚合数据，按照使用者指定的筛选参数进行数据过滤。
+         * 相当于自己编写的算子，是要访问外面的任务参数对象的。
+         * 匿名内部类（算子函数），访问外部对象，是要给外部对象使用final修饰的。
+         */
+        JavaPairRDD<String, String> filteredSessionId2AggrInfoRDD
+                = filterSession(sessionId2AggrInfoRDD, taskParam);
+        System.out.println("过滤后数据总数：" + filteredSessionId2AggrInfoRDD.count());
+        // 打印过滤后的数据的前十条
+        for (Tuple2<String, String> tuple : filteredSessionId2AggrInfoRDD.take(10)) {
+            System.out.println(tuple._2);
+        }
 
         // 关闭Spark上下文
         sc.close();
@@ -240,7 +263,7 @@ public class UserVisitSessionAnalyzeSpark {
         // 即<userId, session部分聚合信息> join <userId, 用户信息>
         JavaPairRDD<Long, Tuple2<String, Row>> userId2FullInfoRDD
                 = userId2PartAggrInfoRDD.join(userId2InfoRDD);
-        
+
         // 对join起来的数据进行拼接，并且返回<sessionId, fullAggrInfo>格式的数据
         JavaPairRDD<String, String> sessionId2FullAggrInfoRDD = userId2FullInfoRDD.mapToPair(
                 new PairFunction<Tuple2<Long, Tuple2<String, Row>>, String, String>() {
@@ -267,6 +290,99 @@ public class UserVisitSessionAnalyzeSpark {
                 }
         );
         return sessionId2FullAggrInfoRDD;
+    }
+
+    /**
+     * 过滤session数据
+     *
+     * @param sessionId2AggrInfoRDD
+     * @return
+     */
+    private static JavaPairRDD<String, String> filterSession(
+            JavaPairRDD<String, String> sessionId2AggrInfoRDD, final JSONObject taskParam) {
+        // 为了使用后面的ValidUtils，所以，这里将所有的筛选参数拼接成一个连接串
+        String startAge = ParamUtils.getParam(taskParam, Constants.PARAM_START_AGE);
+        String endAge = ParamUtils.getParam(taskParam, Constants.PARAM_END_AGE);
+        String professional = ParamUtils.getParam(taskParam, Constants.PARAM_PROFESSIONALS);
+        String cities = ParamUtils.getParam(taskParam, Constants.PARAM_CITIES);
+        String sex = ParamUtils.getParam(taskParam, Constants.PARAM_SEX);
+        String keywords = ParamUtils.getParam(taskParam, Constants.PARAM_KEYWORD);
+        String categoryIds = ParamUtils.getParam(taskParam, Constants.PARAM_CATEGORY_IDS);
+
+        StringBuilder sb = new StringBuilder("");
+        sb.append(StringUtils.isNotEmpty(startAge) ? Constants.PARAM_START_AGE + "=" + startAge + "|" : "");
+        sb.append(StringUtils.isNotEmpty(endAge) ? Constants.PARAM_END_AGE + "=" + endAge + "|" : "");
+        sb.append(StringUtils.isNotEmpty(professional) ? Constants.PARAM_PROFESSIONALS + "=" + professional + "|" : "");
+        sb.append(StringUtils.isNotEmpty(cities) ? Constants.PARAM_CITIES + "=" + cities + "|" : "");
+        sb.append(StringUtils.isNotEmpty(sex) ? Constants.PARAM_SEX + "=" + sex + "|" : "");
+        sb.append(StringUtils.isNotEmpty(keywords) ? Constants.PARAM_KEYWORD + "=" + keywords + "|" : "");
+        sb.append(StringUtils.isNotEmpty(categoryIds) ? Constants.PARAM_CATEGORY_IDS + "=" + categoryIds + "|" : "");
+        String _parameter = (null != sb && sb.length() > 0 ? sb.toString() : "");
+
+        if (_parameter.endsWith("\\|")) {
+            _parameter = _parameter.substring(0, _parameter.length() - 1);
+        }
+
+        final String parameter = _parameter;
+
+        // 根据筛选参数进行过滤
+        JavaPairRDD<String, String> filterSessionId2AggrInfoRDD = sessionId2AggrInfoRDD.filter(
+                new Function<Tuple2<String, String>, Boolean>() {
+                    @Override
+                    public Boolean call(Tuple2<String, String> tuple) throws Exception {
+                        // 过滤逻辑如下
+                        // 1.从tuple中获取聚合数据
+                        String aggrInfo = tuple._2;
+                        // 2.依次按照筛选条件进行过滤
+                        // 2.1按照年龄范围进行过滤（startAge、endAge）
+                        if (!ValidUtils.between(aggrInfo, Constants.FIELD_AGE, parameter,
+                                Constants.PARAM_START_AGE, Constants.PARAM_END_AGE)) {
+                            return false;
+                        }
+                        // 2.2按照职业范围进行过滤（professional）
+                        // 互联网,IT,软件
+                        // 互联网
+                        if (!ValidUtils.in(aggrInfo, Constants.FIELD_PROFESSIONAL, parameter,
+                                Constants.PARAM_PROFESSIONALS)) {
+                            return false;
+                        }
+
+                        // 2.3按照城市范围进行过滤（cities）
+                        // 北京,上海,广州,深圳
+                        // 成都
+                        if (!ValidUtils.in(aggrInfo, Constants.FIELD_CITY, parameter,
+                                Constants.PARAM_CITIES)) {
+                            return false;
+                        }
+
+                        // 2.4按照性别进行过滤
+                        // 男/女
+                        if (!ValidUtils.equal(aggrInfo, Constants.FIELD_SEX, parameter,
+                                Constants.PARAM_SEX)) {
+                            return false;
+                        }
+
+                        // 2.5按照搜索词进行过滤
+                        // 我们session可能搜索了火锅,蛋糕,烧烤
+                        // 我们的筛选条件可能是火锅,串串香,iphone手机
+                        // 那么，in这个校验方法，主要判定session搜索的词中，有任何一个，与筛选条件中
+                        // 任何一个搜索词相等，即通过！
+                        if (!ValidUtils.in(aggrInfo, Constants.FIELD_SEARCH_KEYWORDS,
+                                parameter, Constants.PARAM_KEYWORD)) {
+                            return false;
+                        }
+
+                        // 2.6按照点击品类id进行过滤
+                        if (!ValidUtils.in(aggrInfo, Constants.FIELD_CLICK_CATEGORY_IDS,
+                                parameter, Constants.PARAM_CATEGORY_IDS)) {
+                            return false;
+                        }
+
+                        return true;
+                    }
+                });
+
+        return filterSessionId2AggrInfoRDD;
     }
 
 }

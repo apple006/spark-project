@@ -48,10 +48,12 @@ public class CustomStringUtils {
     public static String getFieldFromConcatString(String str, String delimiter, String field) {
         String[] fields = str.split(delimiter);
         for (String concatField : fields) {
-            String fieldName = concatField.split("=")[0];
-            String fieldsValue = concatField.split("=")[1];
-            if (fieldName.equals(field)) {
-                return fieldsValue;
+            if (concatField.split("=").length == 2) {
+                String fieldName = concatField.split("=")[0];
+                String fieldsValue = concatField.split("=")[1];
+                if (fieldName.equals(field)) {
+                    return fieldsValue;
+                }
             }
         }
         return null;
