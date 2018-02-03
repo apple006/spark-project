@@ -38,12 +38,12 @@ public interface Constants {
 
     String SESSION_COUNT = "session_count";
     // 时长相关
-    String TIME_PERIOD_1s_3s = "1s_3s";
+    String TIME_PERIOD_1s_3s = "1s_3s";// 1-3秒
     String TIME_PERIOD_4s_6s = "4s_6s";
     String TIME_PERIOD_7s_9s = "7s_9s";
     String TIME_PERIOD_10s_30s = "10s_30s";
     String TIME_PERIOD_30s_60s = "30s_60s";
-    String TIME_PERIOD_1m_3m = "1m_3m";
+    String TIME_PERIOD_1m_3m = "1m_3m";// 1-3分钟
     String TIME_PERIOD_3m_10m = "3m_10m";
     String TIME_PERIOD_10m_30m = "10m_30m";
     String TIME_PERIOD_30m = "30m";
