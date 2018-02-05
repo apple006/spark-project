@@ -86,7 +86,7 @@ public class DateUtils {
      * 获取年月日和小时
      *
      * @param datetime 时间（yyyy-MM-dd HH:mm:ss）
-     * @return 结果
+     * @return 结果 yyyy-MM-dd_HH
      */
     public static String getDateHour(String datetime) {
         String date = datetime.split(" ")[0];

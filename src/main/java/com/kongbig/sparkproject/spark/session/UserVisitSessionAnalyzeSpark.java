@@ -25,8 +25,7 @@ import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.hive.HiveContext;
 import scala.Tuple2;
 
-import java.util.Date;
-import java.util.Iterator;
+import java.util.*;
 
 /**
  * Describe: 用户访问session分析Spark作业
@@ -99,12 +98,20 @@ public class UserVisitSessionAnalyzeSpark {
          * 对于Accumulator这种分布式累加计算的变量的使用，有一个重要的说明：
          * 从Accumulator中，获取数据，插入数据库的时候，一定要是在有某一个action操作以后再进行。
          * 如果没有action的话，那么整个程序根本不会运行。
-         * 
+         *
          * 必须把能够触发job执行的操作，放在最终写入MySQL方法之前。
          * 计算出来的结果，在J2EE中，使用两张柱状图显示
          */
-        System.out.println(filteredSessionId2AggrInfoRDD.count());
-        
+        // System.out.println(filteredSessionId2AggrInfoRDD.count());
+
+        /**
+         * 说明：要将上一个功能session聚合统计数据获取到，就必须是在一个action操作出发job之后才能从
+         * Accumulator中获取数据，否则是获取不到数据的，因为没有job执行，Accumulator的值为空。
+         * 所以，将随机抽取的功能的实现代码写在这里，放在session聚合统计功能的最终计算和写库之前，
+         * 因为随机抽取功能中，有一个countByKey算子，是action操作，会出发job。
+         */
+        randomExtractSession(filteredSessionId2AggrInfoRDD);
+
         // 计算各session范围占比，并持久化聚合统计结果（MySQL）
         calculateAndPersistAggrStat(sessionAggrStatAccumulator.value(), taskId);
 
@@ -316,7 +323,8 @@ public class UserVisitSessionAnalyzeSpark {
                                 + Constants.FIELD_SEARCH_KEYWORDS + "=" + searchKeywords + "|"
                                 + Constants.FIELD_CLICK_CATEGORY_IDS + "=" + clickCategoryIds + "|"
                                 + Constants.FIELD_VISIT_LENGTH + "=" + visitLength + "|"
-                                + Constants.FIELD_STEP_LENGTH + "=" + stepLength;
+                                + Constants.FIELD_STEP_LENGTH + "=" + stepLength + "|"
+                                + Constants.FIELD_START_TIME + "=" + DateUtils.formatTime(startTime);
                         // 参数1:session对应的userId; 参数2:session对应的部分聚合数据
                         return new Tuple2<Long, String>(userId, partAggrInfo);
                     }
@@ -525,6 +533,110 @@ public class UserVisitSessionAnalyzeSpark {
     }
 
     /**
+     * 随机抽取session
+     *
+     * @param sessionId2AggrInfoRDD
+     */
+    private static void randomExtractSession(JavaPairRDD<String, String> sessionId2AggrInfoRDD) {
+        // 1.计算每天每小时的session数量，获取<yyyy-MM-dd_HH, sessionId>格式的RDD
+        JavaPairRDD<String, String> time2SessionIdRDD = sessionId2AggrInfoRDD.mapToPair(
+                new PairFunction<Tuple2<String, String>, String, String>() {
+                    @Override
+                    public Tuple2<String, String> call(Tuple2<String, String> tuple) throws Exception {
+                        String aggrInfo = tuple._2;
+                        String startTime = CustomStringUtils.getFieldFromConcatString(
+                                aggrInfo, "\\|", Constants.FIELD_START_TIME);
+                        String dateHour = DateUtils.getDateHour(startTime);
+                        // <yyyy-MM-dd_HH, aggrInfo>
+                        return new Tuple2<String, String>(dateHour, aggrInfo);
+                    }
+                });
+        /**
+         * 每天每小时的session数量，然后计算出每天每小时的session抽取索引，遍历每天每小时session
+         * 首先抽取出的session的聚合数据，写入session_random_extract表
+         * 所以第一个RDD的value应该是session聚合数据（数据全容易操作）
+         */
+        // 得到每天每小时的session数量
+        Map<String, Object> countMap = time2SessionIdRDD.countByKey();
+
+        // 2.使用按时间比例随机抽取算法，计算出每天每小时要抽取session的索引
+        // 将<yyyy-MM-dd_HH, count>格式的map，转换成<yyyy-MM-dd, <HH, count>>的格式
+        // {2018-02-04={08=3, 09=4, 10=8, ...}}
+        Map<String, Map<String, Long>> dateHourCountMap = new HashMap<String, Map<String, Long>>();
+        for (Map.Entry<String, Object> countEntry : countMap.entrySet()) {
+            String dateHour = countEntry.getKey();
+            long count = Long.valueOf(String.valueOf(countEntry.getValue()));
+
+            String date = dateHour.split("_")[0];// yyyy-MM-dd 2018-02-04
+            String hour = dateHour.split("_")[1];// HH 10
+            Map<String, Long> hourCountMap = dateHourCountMap.get(date);
+            if (hourCountMap == null) {
+                hourCountMap = new HashMap<String, Long>();
+                dateHourCountMap.put(date, hourCountMap);
+            }
+            // 设置值
+            hourCountMap.put(hour, count);
+        }
+
+        /**
+         * 开始实现按时间比例随机抽取算法
+         * 总共要抽取100个session，先按照天数，进行平分
+         */
+        int extractNumberPerDay = 100 / dateHourCountMap.size();// 每天抽取的session数（平均）
+        // <date, <hour, (3, 5, 20, 102)>>
+        Map<String, Map<String, List<Integer>>> dateHourExtractMap = new HashMap<String, Map<String, List<Integer>>>();
+        Random random = new Random();
+
+        for (Map.Entry<String, Map<String, Long>> dateHourCountEntry : dateHourCountMap.entrySet()) {
+            String date = dateHourCountEntry.getKey();
+            Map<String, Long> hourCountMap = dateHourCountEntry.getValue();
+
+            // 计算出这一天的session总数
+            long sessionCount = 0L;
+            for (long hourCount : hourCountMap.values()) {
+                sessionCount += hourCount;
+            }
+
+            Map<String, List<Integer>> hourExtractMap = dateHourExtractMap.get(date);
+            if (hourExtractMap == null) {
+                hourExtractMap = new HashMap<String, List<Integer>>();
+                dateHourExtractMap.put(date, hourExtractMap);
+            }
+
+            // 遍历每个小时
+            for (Map.Entry<String, Long> hourCountEntry : hourCountMap.entrySet()) {
+                String hour = hourCountEntry.getKey();
+                long count = hourCountEntry.getValue();
+                /**
+                 * 计算每个小时的session数量，占据当天总session数量的比例，直接乘以每天要抽取的数量
+                 * 就可以计算出当前小时需要抽取的session数量
+                 */
+                int hourExtractNumber = (int) ((double) count / (double) sessionCount * extractNumberPerDay);
+                if (hourExtractNumber > count) {
+                    hourExtractNumber = (int) count;
+                }
+
+                // 先获取当前小时存放随机数的list
+                List<Integer> extractIndexList = hourExtractMap.get(hour);
+                if (extractIndexList == null) {
+                    extractIndexList = new ArrayList<Integer>();
+                    hourExtractMap.put(hour, extractIndexList);
+                }
+
+                // 生成上面计算出来的数量的随机数
+                for (int i = 0; i < hourExtractNumber; i++) {
+                    int extractIndex = random.nextInt((int) count);
+                    while (extractIndexList.contains(extractIndex)) {// 不能重复
+                        extractIndex = random.nextInt((int) count);
+                    }
+
+                    extractIndexList.add(extractIndex);
+                }
+            }
+        }
+    }
+
+    /**
      * 计算各session范围占比，并持久化聚合统计结果
      *
      * @param value
@@ -568,36 +680,36 @@ public class UserVisitSessionAnalyzeSpark {
 
         // 计算各个访问时长和访问步长的范围（比例），要将long转为double，不然小数会变为0
         double visit_length_1s_3s_ratio = NumberUtils.formatDouble(
-                (double)visit_length_1s_3s / (double)session_count, 2);
+                (double) visit_length_1s_3s / (double) session_count, 2);
         double visit_length_4s_6s_ratio = NumberUtils.formatDouble(
-                (double)visit_length_4s_6s / (double)session_count, 2);
+                (double) visit_length_4s_6s / (double) session_count, 2);
         double visit_length_7s_9s_ratio = NumberUtils.formatDouble(
-                (double)visit_length_7s_9s / (double)session_count, 2);
+                (double) visit_length_7s_9s / (double) session_count, 2);
         double visit_length_10s_30s_ratio = NumberUtils.formatDouble(
-                (double)visit_length_10s_30s / (double)session_count, 2);
+                (double) visit_length_10s_30s / (double) session_count, 2);
         double visit_length_30s_60s_ratio = NumberUtils.formatDouble(
-                (double)visit_length_30s_60s / (double)session_count, 2);
+                (double) visit_length_30s_60s / (double) session_count, 2);
         double visit_length_1m_3m_ratio = NumberUtils.formatDouble(
-                (double)visit_length_1m_3m / (double)session_count, 2);
+                (double) visit_length_1m_3m / (double) session_count, 2);
         double visit_length_3m_10m_ratio = NumberUtils.formatDouble(
-                (double)visit_length_3m_10m / (double)session_count, 2);
+                (double) visit_length_3m_10m / (double) session_count, 2);
         double visit_length_10m_30m_ratio = NumberUtils.formatDouble(
-                (double)visit_length_10m_30m / (double)session_count, 2);
+                (double) visit_length_10m_30m / (double) session_count, 2);
         double visit_length_30m_ratio = NumberUtils.formatDouble(
-                (double)visit_length_30m / (double)session_count, 2);
+                (double) visit_length_30m / (double) session_count, 2);
 
         double step_length_1_3_ratio = NumberUtils.formatDouble(
-                (double)step_length_1_3 / (double)session_count, 2);
+                (double) step_length_1_3 / (double) session_count, 2);
         double step_length_4_6_ratio = NumberUtils.formatDouble(
-                (double)step_length_4_6 / (double)session_count, 2);
+                (double) step_length_4_6 / (double) session_count, 2);
         double step_length_7_9_ratio = NumberUtils.formatDouble(
-                (double)step_length_7_9 / (double)session_count, 2);
+                (double) step_length_7_9 / (double) session_count, 2);
         double step_length_10_30_ratio = NumberUtils.formatDouble(
-                (double)step_length_10_30 / (double)session_count, 2);
+                (double) step_length_10_30 / (double) session_count, 2);
         double step_length_30_60_ratio = NumberUtils.formatDouble(
-                (double)step_length_30_60 / (double)session_count, 2);
+                (double) step_length_30_60 / (double) session_count, 2);
         double step_length_60_ratio = NumberUtils.formatDouble(
-                (double)step_length_60 / (double)session_count, 2);
+                (double) step_length_60 / (double) session_count, 2);
 
         // 将统计结果封装为Domain对象
         SessionAggrStat sessionAggrStat = new SessionAggrStat();
