@@ -1,6 +1,7 @@
 package com.kongbig.sparkproject.dao.impl;
 
 import com.kongbig.sparkproject.dao.ISessionAggrStatDAO;
+import com.kongbig.sparkproject.dao.ISessionRandomExtractDAO;
 import com.kongbig.sparkproject.dao.ITaskDAO;
 
 /**
@@ -10,22 +11,16 @@ import com.kongbig.sparkproject.dao.ITaskDAO;
  */
 public class DAOFactory {
 
-    /**
-     * 获取任务管理DAO
-     *
-     * @return
-     */
     public static ITaskDAO getTaskDAO() {
         return new TaskDAOImpl();
     }
 
-    /**
-     * 获取session聚合统计DAO
-     *
-     * @return
-     */
     public static ISessionAggrStatDAO getSessionAggrStatDAO() {
         return new SessionAggrStatDAOImpl();
+    }
+
+    public static ISessionRandomExtractDAO getSessionRandomExtractDAO() {
+        return new SessionRandomExtractDAOImpl();
     }
 
 }
