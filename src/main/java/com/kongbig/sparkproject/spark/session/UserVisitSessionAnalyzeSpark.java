@@ -4,10 +4,12 @@ import com.alibaba.fastjson.JSONObject;
 import com.kongbig.sparkproject.conf.ConfigurationManager;
 import com.kongbig.sparkproject.constant.Constants;
 import com.kongbig.sparkproject.dao.ISessionAggrStatDAO;
+import com.kongbig.sparkproject.dao.ISessionDetailDAO;
 import com.kongbig.sparkproject.dao.ISessionRandomExtractDAO;
 import com.kongbig.sparkproject.dao.ITaskDAO;
 import com.kongbig.sparkproject.dao.impl.DAOFactory;
 import com.kongbig.sparkproject.domain.SessionAggrStat;
+import com.kongbig.sparkproject.domain.SessionDetail;
 import com.kongbig.sparkproject.domain.SessionRandomExtract;
 import com.kongbig.sparkproject.domain.Task;
 import com.kongbig.sparkproject.spark.MockData;
@@ -23,6 +25,7 @@ import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.Function;
 import org.apache.spark.api.java.function.PairFlatMapFunction;
 import org.apache.spark.api.java.function.PairFunction;
+import org.apache.spark.api.java.function.VoidFunction;
 import org.apache.spark.sql.DataFrame;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
@@ -81,6 +84,7 @@ public class UserVisitSessionAnalyzeSpark {
          * 首先要从user_visit_action表中，查询出来指定日期范围内的行为数据
          */
         JavaRDD<Row> actionRDD = getActionRDDByDateRange(sqlContext, taskParam);
+        JavaPairRDD<String, Row> sessionId2ActionRDD = getSessionId2ActionRDD(actionRDD);
 
         /**
          * 首先，可以将行为数据，按照session_id进行groupByKey分组，此时的数据的粒度就是session粒度了。
@@ -116,7 +120,7 @@ public class UserVisitSessionAnalyzeSpark {
          * 所以，将随机抽取的功能的实现代码写在这里，放在session聚合统计功能的最终计算和写库之前，
          * 因为随机抽取功能中，有一个countByKey算子，是action操作，会出发job。
          */
-        randomExtractSession(task.getTaskId(), filteredSessionId2AggrInfoRDD);
+        randomExtractSession(task.getTaskId(), filteredSessionId2AggrInfoRDD, sessionId2ActionRDD);
 
         // 计算各session范围占比，并持久化聚合统计结果（MySQL）
         calculateAndPersistAggrStat(sessionAggrStatAccumulator.value(), taskId);
@@ -207,6 +211,21 @@ public class UserVisitSessionAnalyzeSpark {
                 "and date <= '" + endDate + "'";
         DataFrame actionDF = sqlContext.sql(sql);
         return actionDF.javaRDD();
+    }
+
+    /**
+     * 获取sessionId到访问行为数据的映射的RDD
+     *
+     * @param actionRDD
+     * @return
+     */
+    public static JavaPairRDD<String, Row> getSessionId2ActionRDD(JavaRDD<Row> actionRDD) {
+        return actionRDD.mapToPair(new PairFunction<Row, String, Row>() {
+            @Override
+            public Tuple2<String, Row> call(Row row) throws Exception {
+                return new Tuple2<String, Row>(row.getString(2), row);
+            }
+        });
     }
 
     /**
@@ -544,7 +563,9 @@ public class UserVisitSessionAnalyzeSpark {
      * @param sessionId2AggrInfoRDD
      */
     private static void randomExtractSession(
-            final long taskId, JavaPairRDD<String, String> sessionId2AggrInfoRDD) {
+            final long taskId,
+            JavaPairRDD<String, String> sessionId2AggrInfoRDD,
+            JavaPairRDD<String, Row> sessionId2ActionRDD) {
         /**
          * 1.计算每天每小时的session数量
          * 获取<yyyy-MM-dd_HH, aggrInfo>格式的RDD
@@ -702,6 +723,35 @@ public class UserVisitSessionAnalyzeSpark {
                         return extractSessionIds;
                     }
                 });
+
+        /**
+         * 4.获取抽取出来的session的明细数据
+         */
+        JavaPairRDD<String, Tuple2<String, Row>> extractSessionDetailRDD =
+                extractSessionIdsRDD.join(sessionId2ActionRDD);
+        extractSessionDetailRDD.foreach(new VoidFunction<Tuple2<String, Tuple2<String, Row>>>() {
+            private static final long serialVersionUID = -1851055547113281924L;
+
+            @Override
+            public void call(Tuple2<String, Tuple2<String, Row>> tuple) throws Exception {
+                Row row = tuple._2._2;
+                SessionDetail sessionDetail = new SessionDetail();
+                sessionDetail.setTaskId(taskId);
+                sessionDetail.setUserId(row.getLong(1));
+                sessionDetail.setSessionId(row.getString(2));
+                sessionDetail.setPageId(row.getLong(3));
+                sessionDetail.setActionTime(row.getString(4));
+                sessionDetail.setSearchKeyword(row.getString(5));
+                sessionDetail.setClickCategoryId(row.getLong(6));
+                sessionDetail.setClickProductId(row.getLong(7));
+                sessionDetail.setOrderCategoryIds(row.getString(8));
+                sessionDetail.setOrderProductIds(row.getString(9));
+                sessionDetail.setPayCategoryIds(row.getString(10));
+                sessionDetail.setPayProductIds(row.getString(11));
+                ISessionDetailDAO sessionDetailDAO = DAOFactory.getSessionDetailDAO();
+                sessionDetailDAO.insert(sessionDetail);
+            }
+        });
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.kongbig.sparkproject.dao.impl;
 
 import com.kongbig.sparkproject.dao.ISessionAggrStatDAO;
+import com.kongbig.sparkproject.dao.ISessionDetailDAO;
 import com.kongbig.sparkproject.dao.ISessionRandomExtractDAO;
 import com.kongbig.sparkproject.dao.ITaskDAO;
 
@@ -23,4 +24,8 @@ public class DAOFactory {
         return new SessionRandomExtractDAOImpl();
     }
 
+    public static ISessionDetailDAO getSessionDetailDAO(){
+        return new SessionDetailDAOImpl();
+    }
+    
 }
