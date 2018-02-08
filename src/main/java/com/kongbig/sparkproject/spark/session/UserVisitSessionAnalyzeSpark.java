@@ -4,15 +4,9 @@ import com.alibaba.fastjson.JSONObject;
 import com.google.common.base.Optional;
 import com.kongbig.sparkproject.conf.ConfigurationManager;
 import com.kongbig.sparkproject.constant.Constants;
-import com.kongbig.sparkproject.dao.ISessionAggrStatDAO;
-import com.kongbig.sparkproject.dao.ISessionDetailDAO;
-import com.kongbig.sparkproject.dao.ISessionRandomExtractDAO;
-import com.kongbig.sparkproject.dao.ITaskDAO;
+import com.kongbig.sparkproject.dao.*;
 import com.kongbig.sparkproject.dao.impl.DAOFactory;
-import com.kongbig.sparkproject.domain.SessionAggrStat;
-import com.kongbig.sparkproject.domain.SessionDetail;
-import com.kongbig.sparkproject.domain.SessionRandomExtract;
-import com.kongbig.sparkproject.domain.Task;
+import com.kongbig.sparkproject.domain.*;
 import com.kongbig.sparkproject.spark.MockData;
 import com.kongbig.sparkproject.util.*;
 import org.apache.commons.lang.StringUtils;
@@ -159,7 +153,7 @@ public class UserVisitSessionAnalyzeSpark {
          *      所以推荐大数据项目，在开发和代码的架构中，有限考虑性能；其次考虑功能代码的划分、解耦合
          */
 
-        getTop10Category(filteredSessionId2AggrInfoRDD, sessionId2ActionRDD);
+        getTop10Category(task.getTaskId(), filteredSessionId2AggrInfoRDD, sessionId2ActionRDD);
 
         // 关闭Spark上下文
         sc.close();
@@ -879,7 +873,8 @@ public class UserVisitSessionAnalyzeSpark {
      * @param filteredSessionId2AggrInfoRDD
      * @param sessionId2ActionRDD
      */
-    private static void getTop10Category(JavaPairRDD<String, String> filteredSessionId2AggrInfoRDD,
+    private static void getTop10Category(long taskId,
+                                         JavaPairRDD<String, String> filteredSessionId2AggrInfoRDD,
                                          JavaPairRDD<String, Row> sessionId2ActionRDD) {
         /**
          * 1.获取符合条件的session访问过的所有品类
@@ -931,6 +926,12 @@ public class UserVisitSessionAnalyzeSpark {
                         return list;
                     }
                 });
+        /**
+         * 必须要进行去重
+         * 如果不去重的话，会出现重复的categoryId，排序会对重复的categoryId以及countInfo进行排序
+         * 最后很可能会拿到重复的数据。
+         */
+        categoryIdRDD = categoryIdRDD.distinct();
 
         /**
          * 2.计算各品类的点击、下单和支付的次数
@@ -961,6 +962,54 @@ public class UserVisitSessionAnalyzeSpark {
          */
         JavaPairRDD<Long, String> categoryId2CountRDD = joinCategoryAndData(
                 categoryIdRDD, clickCategoryId2CountRDD, orderCategoryId2CountRDD, payCategoryId2CountRDD);
+
+        /**
+         * 4.自定义二次排序key
+         */
+
+        /**
+         * 5.将数据映射成<CategorySortKey, info>格式的RDD，然后进行二次排序（降序）
+         */
+        JavaPairRDD<CategorySortKey, String> sortKey2CountRDD = categoryId2CountRDD.mapToPair(
+                new PairFunction<Tuple2<Long, String>, CategorySortKey, String>() {
+                    private static final long serialVersionUID = -2002926188243478134L;
+
+                    @Override
+                    public Tuple2<CategorySortKey, String> call(Tuple2<Long, String> tuple) throws Exception {
+                        String countInfo = tuple._2;
+                        long clickCount = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                                countInfo, "\\|", Constants.FIELD_CLICK_COUNT));
+                        long orderCount = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                                countInfo, "\\|", Constants.FIELD_ORDER_COUNT));
+                        long payCount = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                                countInfo, "\\|", Constants.FIELD_PAY_COUNT));
+
+                        CategorySortKey sortKey = new CategorySortKey(clickCount, orderCount, payCount);
+                        return new Tuple2<CategorySortKey, String>(sortKey, countInfo);
+                    }
+                });
+        JavaPairRDD<CategorySortKey, String> sortedCategoryCountRDD =
+                sortKey2CountRDD.sortByKey(false);// false:降序排序
+
+        /**
+         * 6.用take(10)取出top10热门品类，并写入MySQL
+         */
+        ITop10CategoryDAO top10CategoryDAO = DAOFactory.getTop10CategoryDAO();
+        List<Tuple2<CategorySortKey, String>> top10CategoryList = sortedCategoryCountRDD.take(10);
+        for (Tuple2<CategorySortKey, String> tuple : top10CategoryList) {
+            String countInfo = tuple._2;
+            long categoryId = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                    countInfo, "\\|", Constants.FIELD_CATEGORY_ID));
+            long clickCount = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                    countInfo, "\\|", Constants.FIELD_CLICK_COUNT));
+            long orderCount = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                    countInfo, "\\|", Constants.FIELD_ORDER_COUNT));
+            long payCount = Long.valueOf(CustomStringUtils.getFieldFromConcatString(
+                    countInfo, "\\|", Constants.FIELD_PAY_COUNT));
+
+            Top10Category category = new Top10Category(taskId, categoryId, clickCount, orderCount, payCount);
+            top10CategoryDAO.insert(category);
+        }
     }
 
     /**
@@ -978,7 +1027,7 @@ public class UserVisitSessionAnalyzeSpark {
                     @Override
                     public Boolean call(Tuple2<String, Row> tuple) throws Exception {
                         Row row = tuple._2;
-                        return Long.valueOf(row.getLong(6)) != null ? true : false;
+                        return row.get(6) != null;
                     }
                 });
 
@@ -1170,7 +1219,7 @@ public class UserVisitSessionAnalyzeSpark {
                             payCount = optional.get();
                         }
                         value = value + "|" + Constants.FIELD_PAY_COUNT + "=" + payCount;
-                        return null;
+                        return new Tuple2<Long, String>(categoryId, value);
                     }
                 });
         return tmpMapRDD;
