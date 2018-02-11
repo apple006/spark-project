@@ -18,6 +18,7 @@ import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.*;
+import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.DataFrame;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
@@ -104,12 +105,12 @@ public class UserVisitSessionAnalyzeSpark {
          * StorageLevel.MEMORY_AND_DISK()，第三选择
          * StorageLevel.MEMORY_AND_DISK_SER()，第四选择
          * StorageLevel.DISK_ONLY()，第五选择（纯磁盘）
-         * 
+         *
          * 如果内存充足，要使用双副本高可用机制
          * 选择后缀带_2的策略
          * 如：StorageLevel.MEMORY_ONLY()_2
          */
-        
+
         /**
          * 首先，可以将行为数据，按照session_id进行groupByKey分组，此时的数据的粒度就是session粒度了。
          * 然后，可以将session粒度的数据与用户信息数据，进行join，就获取到session粒度的数据（包含session对应的user的信息）
@@ -155,7 +156,7 @@ public class UserVisitSessionAnalyzeSpark {
          * 所以，将随机抽取的功能的实现代码写在这里，放在session聚合统计功能的最终计算和写库之前，
          * 因为随机抽取功能中，有一个countByKey算子，是action操作，会出发job。
          */
-        randomExtractSession(task.getTaskId(), filteredSessionId2AggrInfoRDD, sessionId2DetailRDD);// 重构：用筛选后的
+        randomExtractSession(sc, task.getTaskId(), filteredSessionId2AggrInfoRDD, sessionId2DetailRDD);// 重构：用筛选后的
 
         // 计算各session范围占比，并持久化聚合统计结果（MySQL）
         calculateAndPersistAggrStat(sessionAggrStatAccumulator.value(), taskId);
@@ -625,6 +626,7 @@ public class UserVisitSessionAnalyzeSpark {
      * @param sessionId2AggrInfoRDD
      */
     private static void randomExtractSession(
+            JavaSparkContext sc,
             final long taskId,
             JavaPairRDD<String, String> sessionId2AggrInfoRDD,
             JavaPairRDD<String, Row> sessionId2ActionRDD) {
@@ -681,8 +683,16 @@ public class UserVisitSessionAnalyzeSpark {
          * 总共要抽取100个session，先按照天数，进行平分
          */
         int extractNumberPerDay = 100 / dateHourCountMap.size();// 每天抽取的session数（平均）
+
         // <date, <hour, (3, 5, 20, 102)>>
-        final Map<String, Map<String, List<Integer>>> dateHourExtractMap = new HashMap<String, Map<String, List<Integer>>>();
+        /**
+         * session随机抽取功能
+         * 用到了一个比较大的变量，随机抽取索引map，之前是直接在算子里面使用了这个map，
+         * 所以每个task都会拷贝一份map副本，比较消耗内存和网络传输性能。
+         *
+         * 将map做成广播变量
+         */
+        Map<String, Map<String, List<Integer>>> dateHourExtractMap = new HashMap<String, Map<String, List<Integer>>>();
         Random random = new Random();
 
         for (Map.Entry<String, Map<String, Long>> dateHourCountEntry : dateHourCountMap.entrySet()) {
@@ -734,6 +744,12 @@ public class UserVisitSessionAnalyzeSpark {
         }
 
         /**
+         * 广播变量：就是SparkContext的broadcast()方法，传入你要广播的变量。
+         */
+        final Broadcast<Map<String, Map<String, List<Integer>>>> dateHourExtractMapBroadcast =
+                sc.broadcast(dateHourExtractMap);
+
+        /**
          * 3.遍历每天每小时的session，然后根据随机索引进行抽取
          */
         // 执行group算子，得到<dateHour, (session aggrInfo)> Map<String, List<String>>
@@ -759,6 +775,9 @@ public class UserVisitSessionAnalyzeSpark {
                         String hour = dateHour.split("_")[1];
                         Iterator<String> iterator = tuple._2.iterator();
 
+                        // 取出之前封装的广播变量。value(); / getValue();
+                        Map<String, Map<String, List<Integer>>> dateHourExtractMap = 
+                                dateHourExtractMapBroadcast.value();
                         List<Integer> extractIndexList = dateHourExtractMap.get(date).get(hour);
                         ISessionRandomExtractDAO sessionRandomExtractDAO = DAOFactory.getSessionRandomExtractDAO();
 
