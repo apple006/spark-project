@@ -9,6 +9,8 @@ import com.kongbig.sparkproject.dao.impl.DAOFactory;
 import com.kongbig.sparkproject.domain.*;
 import com.kongbig.sparkproject.spark.MockData;
 import com.kongbig.sparkproject.util.*;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.ints.IntList;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
 import org.apache.spark.Accumulator;
@@ -58,7 +60,17 @@ public class UserVisitSessionAnalyzeSpark {
         // 构建Spark上下文
         SparkConf conf = new SparkConf()
                 .setAppName(Constants.SPARK_APP_NAME_SESSION)
-                .setMaster("local");
+                .setMaster("local")
+                .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+                .registerKryoClasses(new Class[]{
+                        CategorySortKey.class,
+                        IntList.class});
+        /**
+         * 比如，获取top10热门品类功能中，二次排序，自定义了一个Key
+         * 那个key是需要在进行shuffle的时候，进行网络传输的，因此也是要求实现序列化的
+         * 启用kryo机制以后，就会用Kyro去序列化和反序列化CategorySortKey
+         * 所以这里要求，为了获取最佳心能，注册一下我们自定义的类
+         */
         JavaSparkContext sc = new JavaSparkContext(conf);
         SQLContext sqlContext = getSQLContext(sc.sc());// 从JavaSparkContext取出对应的SparkContext
 
@@ -744,10 +756,34 @@ public class UserVisitSessionAnalyzeSpark {
         }
 
         /**
+         * fastutil的使用，比如List<Integer>的list，对应到fastutil就是IntList
+         */
+        Map<String, Map<String, IntList>> fastUtilDateHourExtractMap =
+                new HashMap<String, Map<String, IntList>>();
+        for (Map.Entry<String, Map<String, List<Integer>>> dateHourExtractEntry : dateHourExtractMap.entrySet()) {
+            String date = dateHourExtractEntry.getKey();
+            Map<String, List<Integer>> hourExtractMap = dateHourExtractEntry.getValue();// 原来的
+            Map<String, IntList> fastUtilHourExtractMap = new HashMap<String, IntList>();// fastutil的
+
+            for (Map.Entry<String, List<Integer>> hourExtractEntry : hourExtractMap.entrySet()) {
+                String hour = hourExtractEntry.getKey();
+                List<Integer> extractList = hourExtractEntry.getValue();
+                IntList fastUtilExtractList = new IntArrayList();
+                for (int i = 0; i < extractList.size(); i++) {
+                    // 将ArrayList的元素放入IntArrayList
+                    fastUtilExtractList.add(extractList.get(i));
+                }
+
+                fastUtilHourExtractMap.put(hour, fastUtilExtractList);// Map<String, IntList>
+            }
+            fastUtilDateHourExtractMap.put(date, fastUtilHourExtractMap);// Map<String, Map<String, IntList>>
+        }
+
+        /**
          * 广播变量：就是SparkContext的broadcast()方法，传入你要广播的变量。
          */
-        final Broadcast<Map<String, Map<String, List<Integer>>>> dateHourExtractMapBroadcast =
-                sc.broadcast(dateHourExtractMap);
+        final Broadcast<Map<String, Map<String, IntList>>> dateHourExtractMapBroadcast =
+                sc.broadcast(fastUtilDateHourExtractMap);
 
         /**
          * 3.遍历每天每小时的session，然后根据随机索引进行抽取
@@ -776,7 +812,7 @@ public class UserVisitSessionAnalyzeSpark {
                         Iterator<String> iterator = tuple._2.iterator();
 
                         // 取出之前封装的广播变量。value(); / getValue();
-                        Map<String, Map<String, List<Integer>>> dateHourExtractMap = 
+                        Map<String, Map<String, IntList>> dateHourExtractMap =
                                 dateHourExtractMapBroadcast.value();
                         List<Integer> extractIndexList = dateHourExtractMap.get(date).get(hour);
                         ISessionRandomExtractDAO sessionRandomExtractDAO = DAOFactory.getSessionRandomExtractDAO();
