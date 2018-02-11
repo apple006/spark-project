@@ -22,6 +22,7 @@ import org.apache.spark.sql.DataFrame;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.hive.HiveContext;
+import org.apache.spark.storage.StorageLevel;
 import scala.Tuple2;
 
 import java.util.*;
@@ -75,15 +76,46 @@ public class UserVisitSessionAnalyzeSpark {
          * 要进行session粒度的数据聚合：
          * 首先要从user_visit_action表中，查询出来指定日期范围内的行为数据
          */
+        /**
+         * actionRDD，就是一个公共RDD
+         * 一、要用actionRDD，获取一个公共的sessionId为key的PairRDD
+         * 二、actionRDD，用在了session聚合环节里面
+         *
+         * sessionId为key的PairRDD，是确定了，在后面要多次使用的
+         *      1、与通过筛选的sessionId进行join，获取通过筛选的session的明细数据
+         *      2、将这个RDD，直接传入aggregateBySession方法，进行session聚合统计
+         *
+         * *重构完以后，actionRDD，就只在最开始，使用一次，用来生成以sessionId为key的RDD     
+         */
         JavaRDD<Row> actionRDD = getActionRDDByDateRange(sqlContext, taskParam);
-        JavaPairRDD<String, Row> sessionId2ActionRDD = getSessionId2ActionRDD(actionRDD);
 
+        JavaPairRDD<String, Row> sessionId2ActionRDD = getSessionId2ActionRDD(actionRDD);
+        /**
+         * sessionId到访问行为数据的映射的RDD用了两次，可以做“持久化操作”
+         * 第一次：用于获取session聚合的数据
+         * 第二次：用于获取通过筛选的session对应的访问明细数据
+         * （这里默认用持久化到内存一份就够->纯内存）
+         */
+        sessionId2ActionRDD = sessionId2ActionRDD.persist(StorageLevel.MEMORY_ONLY());
+        /**
+         * 持久化：
+         * persist(StorageLevel.MEMORY_ONLY())，为纯内存，可以用cache()方法替代
+         * StorageLevel.MEMORY_ONLY_SER()，第二选择（有序列化）
+         * StorageLevel.MEMORY_AND_DISK()，第三选择
+         * StorageLevel.MEMORY_AND_DISK_SER()，第四选择
+         * StorageLevel.DISK_ONLY()，第五选择（纯磁盘）
+         * 
+         * 如果内存充足，要使用双副本高可用机制
+         * 选择后缀带_2的策略
+         * 如：StorageLevel.MEMORY_ONLY()_2
+         */
+        
         /**
          * 首先，可以将行为数据，按照session_id进行groupByKey分组，此时的数据的粒度就是session粒度了。
          * 然后，可以将session粒度的数据与用户信息数据，进行join，就获取到session粒度的数据（包含session对应的user的信息）
          */
         // <sessionId, (sessionId,searchKeywords,clickCategoryIds,age,professinal,city,sex)>
-        JavaPairRDD<String, String> sessionId2AggrInfoRDD = aggregateBySession(sqlContext, actionRDD);
+        JavaPairRDD<String, String> sessionId2AggrInfoRDD = aggregateBySession(sqlContext, sessionId2ActionRDD);
 
         /**
          * 针对session粒度的聚合数据，按照使用者指定的筛选参数进行数据过滤。
@@ -95,10 +127,17 @@ public class UserVisitSessionAnalyzeSpark {
                 = sc.accumulator("", new SessionAggrStatAccumulator());
         JavaPairRDD<String, String> filteredSessionId2AggrInfoRDD = filterSessionAndAggrStat(
                 sessionId2AggrInfoRDD, taskParam, sessionAggrStatAccumulator);
+        // filteredSessionId2AggrInfoRDD也用两次，可进行持久化
+        filteredSessionId2AggrInfoRDD = filteredSessionId2AggrInfoRDD.persist(StorageLevel.MEMORY_ONLY());
 
-        // 生成公共的RDD：通过筛选条件的session的访问明细数据
+        // *生成公共的RDD：通过筛选条件的session的访问明细数据
+        /**
+         * 重构：sessionId2DetailRDD，就是代表了通过筛选的session对应的访问明细数据
+         */
         JavaPairRDD<String, Row> sessionId2DetailRDD = getSessionId2DetailRDD(
                 filteredSessionId2AggrInfoRDD, sessionId2ActionRDD);
+        // sessionId2DetailRDD用了3次，可进行持久化
+        sessionId2DetailRDD = sessionId2DetailRDD.persist(StorageLevel.MEMORY_ONLY());
 
         /**
          * 对于Accumulator这种分布式累加计算的变量的使用，有一个重要的说明：
@@ -116,7 +155,7 @@ public class UserVisitSessionAnalyzeSpark {
          * 所以，将随机抽取的功能的实现代码写在这里，放在session聚合统计功能的最终计算和写库之前，
          * 因为随机抽取功能中，有一个countByKey算子，是action操作，会出发job。
          */
-        randomExtractSession(task.getTaskId(), filteredSessionId2AggrInfoRDD, sessionId2ActionRDD);
+        randomExtractSession(task.getTaskId(), filteredSessionId2AggrInfoRDD, sessionId2DetailRDD);// 重构：用筛选后的
 
         // 计算各session范围占比，并持久化聚合统计结果（MySQL）
         calculateAndPersistAggrStat(sessionAggrStatAccumulator.value(), taskId);
@@ -241,25 +280,7 @@ public class UserVisitSessionAnalyzeSpark {
      * @return session粒度聚合数据
      */
     private static JavaPairRDD<String, String> aggregateBySession(
-            SQLContext sqlContext, final JavaRDD<Row> actionRDD) {
-        // 现在actionRDD中的元素是Row，一个Row就是一行用户访问行为记录(如:一次点击或搜索)
-        // 1.需要将这个Row映射成<sessionId, Row>的格式
-        JavaPairRDD<String, Row> sessionId2ActionRDD = actionRDD.mapToPair(
-                /**
-                 * PairFunction
-                 * 参数1:相当于函数的输入
-                 * 参数2和参数3:相当于是函数的输出（Tuple），分别是Tuple的第一、第二个值
-                 */
-                new PairFunction<Row, String, Row>() {
-                    private static final long serialVersionUID = -5830760044266343903L;
-
-                    @Override
-                    public Tuple2<String, Row> call(Row row) throws Exception {
-                        // MockData类中临时表user_visit_action第3个数是sessionId
-                        return new Tuple2<String, Row>(row.getString(2), row);
-                    }
-                });
-
+            SQLContext sqlContext, final JavaPairRDD<String, Row> sessionId2ActionRDD) {
         // 对行为数据按session粒度进行分组
         // key是sessionId，即按sessionId进行了分组
         JavaPairRDD<String, Iterable<Row>> sessionId2ActionsRDD
@@ -576,7 +597,7 @@ public class UserVisitSessionAnalyzeSpark {
     }
 
     /**
-     * 获取通过筛选条件的session的访问明细数据
+     * 获取通过筛选条件的session的访问明细数据(生成公共的RDD)
      *
      * @param sessionId2AggrInfoRDD
      * @param sessionId2ActionRDD
