@@ -62,6 +62,7 @@ public class UserVisitSessionAnalyzeSpark {
                 .setAppName(Constants.SPARK_APP_NAME_SESSION)
                 .setMaster("local")
                 .set("spark.storage.memoryFraction", "0.5")// 降低cache操作的内存占比(默认0.6)，从而减少JVM的minor gc和full gc操作
+                .set("spark.shuffle.consolidateFiles", "true")// shuffle调优，设置合并map端输出文件
                 .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
                 .registerKryoClasses(new Class[]{
                         CategorySortKey.class,
